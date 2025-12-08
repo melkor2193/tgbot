@@ -1,4 +1,3 @@
-# bot.py
 import logging
 
 from telegram import (
@@ -44,16 +43,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-# ==================== /start ====================
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     tg_id = user.id
 
     db_user = get_user_by_telegram_id(tg_id)
 
-    # Новый пользователь — выбор роли
     if not db_user:
         keyboard = [
             [InlineKeyboardButton("Я участник", callback_data="role_participant")],
@@ -66,7 +61,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Уже зарегистрирован: показываем роль и КНОПКИ
     role = db_user["role"]
     role_ru = "Участник" if role == ROLE_PARTICIPANT else "Ведущий"
 
@@ -92,9 +86,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
     )
 
-
-# ==================== Выбор роли (callback) ====================
-
 async def role_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -106,7 +97,6 @@ async def role_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     db_user = get_user_by_telegram_id(tg_id)
 
-    # ---- Участник ----
     if data == "role_participant":
         current_count = get_participant_count()
         if (not db_user) and current_count >= 6:
@@ -133,7 +123,6 @@ async def role_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ---- Ведущий ----
     if data == "role_host":
         existing_host = get_host()
         if existing_host and (not db_user or existing_host["telegram_id"] != tg_id):
@@ -149,9 +138,6 @@ async def role_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Пожалуйста, отправьте PIN-код ведущего одним сообщением."
         )
 
-
-# ==================== Кнопки действий (участник / ведущий) ====================
-
 async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -165,26 +151,20 @@ async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Сначала зарегистрируйтесь через /start и выберите роль."
         )
         return
-
-    # Кнопка участника: Добавить видео
+    
     if data == "action_add_video":
         if db_user["role"] != ROLE_PARTICIPANT:
             await query.edit_message_text("Эта кнопка доступна только участникам.")
             return
-        # Переиспользуем логику выбор номинации для добавления видео
         await send_add_video_nomination_menu(query.message, db_user, context)
         return
 
-    # Кнопка ведущего: Панель ведущего
     if data == "action_host_panel":
         if db_user["role"] != ROLE_HOST:
             await query.edit_message_text("Эта кнопка доступна только ведущему.")
             return
         await send_host_panel(query.message, db_user, context)
         return
-
-
-# ==================== Добавление видео (участник) ====================
 
 async def send_add_video_nomination_menu(message, db_user, context: ContextTypes.DEFAULT_TYPE):
     nominations = get_nominations()
@@ -246,7 +226,7 @@ async def add_video_nomination_callback(update: Update, context: ContextTypes.DE
         )
         return
 
-    data = query.data  # "add_video_nom_X"
+    data = query.data 
     try:
         nomination_id = int(data.replace("add_video_nom_", ""))
     except ValueError:
@@ -282,9 +262,6 @@ async def add_video_nomination_callback(update: Update, context: ContextTypes.DE
         f"Сейчас у вас {existing_count} видео.\n\n"
         "Отправьте сообщение с НАЗВАНИЕМ видео."
     )
-
-
-# ==================== Панель ведущего ====================
 
 async def send_host_panel(message, db_user, context: ContextTypes.DEFAULT_TYPE):
     nominations = get_nominations()
@@ -332,9 +309,6 @@ async def host_nomination_callback(update: Update, context: ContextTypes.DEFAULT
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-
-# ==================== Запуск голосования (ведущий) ====================
-
 async def start_vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -349,7 +323,6 @@ async def start_vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     for p in participants:
         videos = get_videos_for_nomination_excluding_user(nomination_id, p["id"])
         if not videos:
-            # этому участнику нечего голосовать
             continue
 
         buttons = [
@@ -371,14 +344,11 @@ async def start_vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         "Участникам отправлены варианты.",
     )
 
-
-# ==================== Голос участника ====================
-
 async def participant_vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    data = query.data.split("_")  # ["vote", nominationid, videoid]
+    data = query.data.split("_")  
     nomination_id, video_id = int(data[1]), int(data[2])
     db_user = get_user_by_telegram_id(query.from_user.id)
 
@@ -388,9 +358,6 @@ async def participant_vote_callback(update: Update, context: ContextTypes.DEFAUL
 
     save_vote(nomination_id, db_user["id"], video_id)
     await query.edit_message_text("✅ Ваш голос принят! Спасибо.")
-
-
-# ==================== Закрытие голосования (ведущий, результаты) ====================
 
 async def stop_vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -425,15 +392,11 @@ async def stop_vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode="Markdown",
     )
 
-
-# ==================== Тексты: PIN ведущего + шаги добавления видео ====================
-
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     tg_id = user.id
     text = (update.message.text or "").strip()
 
-    # ---- Ввод PIN для ведущего ----
     if context.user_data.get("awaiting_host_pin"):
         if text == HOST_PIN:
             context.user_data["awaiting_host_pin"] = False
@@ -462,7 +425,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db_user = get_user_by_telegram_id(tg_id)
 
-    # ---- Шаг 1: название видео ----
     nomination_id_for_title = context.user_data.get("awaiting_video_title_nomination_id")
     if nomination_id_for_title is not None and db_user and db_user["role"] == ROLE_PARTICIPANT:
         context.user_data["temp_video_title"] = text
@@ -476,7 +438,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ---- Шаг 2: ссылка видео ----
     nomination_id_for_url = context.user_data.get("awaiting_video_url_nomination_id")
     if nomination_id_for_url is not None and db_user and db_user["role"] == ROLE_PARTICIPANT:
         title = context.user_data.get("temp_video_title")
@@ -511,26 +472,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ---- Прочие тексты ----
     await update.message.reply_text(
         "Сообщение получено.\n"
         "Используйте /start, чтобы увидеть доступные вам кнопки."
     )
 
-
-# ==================== main ====================
-
 def main():
     init_db()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # Команды (запасные)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add_video", add_video_command))
     app.add_handler(CommandHandler("host_panel", host_panel))
-
-    # Callback-и
     app.add_handler(CallbackQueryHandler(role_callback, pattern="^role_"))
     app.add_handler(CallbackQueryHandler(action_callback, pattern="^action_"))
     app.add_handler(CallbackQueryHandler(add_video_nomination_callback, pattern="^add_video_nom_"))
@@ -539,7 +492,6 @@ def main():
     app.add_handler(CallbackQueryHandler(stop_vote_callback, pattern="^stop_vote_"))
     app.add_handler(CallbackQueryHandler(participant_vote_callback, pattern="^vote_"))
 
-    # Тексты
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     print("Бот запущен. Ctrl+C для остановки.")

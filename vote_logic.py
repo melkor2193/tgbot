@@ -1,4 +1,3 @@
-# vote_logic.py
 from typing import List, Dict, Optional
 from db import get_connection
 

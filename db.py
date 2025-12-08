@@ -1,4 +1,3 @@
-# db.py
 import sqlite3
 from typing import Optional, Dict, Any, List
 
@@ -62,7 +61,6 @@ def init_db() -> None:
             """
         )
 
-        # ---- фиксированные названия номинаций ----
         nomination_names = {
             1: "Еда",
             2: "Животные",
@@ -83,7 +81,6 @@ def init_db() -> None:
             17: "Музыкальное",
         }
 
-        # создаём номинации, если их ещё нет, и обновляем названия, если были заглушки
         for nom_id, name in nomination_names.items():
             conn.execute(
                 """
@@ -102,10 +99,6 @@ def init_db() -> None:
             )
 
         conn.commit()
-
-
-
-# ---------- USERS ----------
 
 def get_user_by_telegram_id(telegram_id: int) -> Optional[Dict[str, Any]]:
     with get_connection() as conn:
@@ -165,8 +158,6 @@ def get_host() -> Optional[Dict[str, Any]]:
         return dict(row) if row else None
 
 
-# ---------- NOMINATIONS ----------
-
 def get_nominations() -> List[Dict[str, Any]]:
     with get_connection() as conn:
         cur = conn.execute(
@@ -184,9 +175,6 @@ def get_nomination_by_id(nomination_id: int) -> Optional[Dict[str, Any]]:
         )
         row = cur.fetchone()
         return dict(row) if row else None
-
-
-# ---------- VIDEOS ----------
 
 def get_participant_videos_count(participant_id: int, nomination_id: int) -> int:
     with get_connection() as conn:
