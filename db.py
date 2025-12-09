@@ -235,3 +235,28 @@ def get_participant_videos_for_nomination(
         )
         rows = cur.fetchall()
         return [dict(r) for r in rows]
+
+def get_all_videos_with_meta() -> list[Dict[str, Any]]:
+    """
+    Все прикреплённые видео с номинацией и участником.
+    Используется ведущим для просмотра текущих работ.
+    """
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            SELECT
+                n.id AS nomination_id,
+                n.name AS nomination_name,
+                u.id AS participant_id,
+                u.display_name AS participant_name,
+                v.id AS video_id,
+                v.title AS title,
+                v.url AS url
+            FROM videos v
+            JOIN nominations n ON v.nomination_id = n.id
+            JOIN users u ON v.participant_id = u.id
+            ORDER BY n.id, u.display_name, v.id
+            """
+        )
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]

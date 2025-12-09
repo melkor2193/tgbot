@@ -15,6 +15,7 @@ from telegram.ext import (
 )
 
 from config import BOT_TOKEN, HOST_PIN
+
 from db import (
     init_db,
     get_user_by_telegram_id,
@@ -28,9 +29,11 @@ from db import (
     create_video,
     get_participant_videos_for_nomination,
     get_connection,
+    get_all_videos_with_meta,
     ROLE_PARTICIPANT,
     ROLE_HOST,
 )
+
 from vote_logic import (
     get_videos_for_nomination_excluding_user,
     save_vote,
@@ -270,10 +273,67 @@ async def send_host_panel(message, db_user, context: ContextTypes.DEFAULT_TYPE):
         for nom in nominations
     ]
 
+    keyboard.append(
+        [InlineKeyboardButton("📄 Все прикреплённые видео", callback_data="host_all_videos")]
+    )
+
     await message.reply_text(
-        "Выберите номинацию для управления голосованием:",
+        "Выберите номинацию для управления голосованием "
+        "или посмотрите все прикреплённые видео:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
+async def host_all_videos_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ведущий смотрит все прикреплённые видео по номинациям и участникам."""
+    query = update.callback_query
+    await query.answer()
+
+    user = query.from_user
+    db_user = get_user_by_telegram_id(user.id)
+    if not db_user or db_user["role"] != ROLE_HOST:
+        await query.edit_message_text("Эта функция доступна только ведущему.")
+        return
+
+    rows = get_all_videos_with_meta()
+    if not rows:
+        await query.edit_message_text("Пока ни одно видео не прикреплено.")
+        return
+
+    lines: list[str] = []
+
+    current_nomination_id = None
+    current_participant_id = None
+    per_participant_counter = 0
+
+    for r in rows:
+        nom_id = r["nomination_id"]
+        nom_name = r["nomination_name"]
+        part_id = r["participant_id"]
+        part_name = r["participant_name"]
+        title = r["title"]
+        url = r["url"]
+
+        if nom_id != current_nomination_id:
+            if lines:  
+                lines.append("")
+            lines.append(f"Номинация {nom_id}. {nom_name}")
+            current_nomination_id = nom_id
+            current_participant_id = None  
+
+        if part_id != current_participant_id:
+            lines.append("")  
+            lines.append(part_name)
+            current_participant_id = part_id
+            per_participant_counter = 1
+        else:
+            per_participant_counter += 1
+
+        lines.append(f'{per_participant_counter}. "{title}"')
+        lines.append(url)
+
+    text = "\n".join(lines)
+
+    await query.edit_message_text(text)
 
 
 async def host_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -315,7 +375,6 @@ async def start_vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     nomination_id = int(query.data.replace("start_vote_", ""))
     nomination = get_nomination_by_id(nomination_id)
 
-    # список участников
     with get_connection() as conn:
         cur = conn.execute("SELECT * FROM users WHERE role = 'participant'")
         participants = [dict(r) for r in cur.fetchall()]
@@ -491,6 +550,8 @@ def main():
     app.add_handler(CallbackQueryHandler(start_vote_callback, pattern="^start_vote_"))
     app.add_handler(CallbackQueryHandler(stop_vote_callback, pattern="^stop_vote_"))
     app.add_handler(CallbackQueryHandler(participant_vote_callback, pattern="^vote_"))
+    app.add_handler(CallbackQueryHandler(host_all_videos_callback, pattern="^host_all_videos$"))
+
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
