@@ -260,3 +260,16 @@ def get_all_videos_with_meta() -> list[Dict[str, Any]]:
         )
         rows = cur.fetchall()
         return [dict(r) for r in rows]
+
+def delete_video_for_participant(video_id: int, participant_id: int) -> bool:
+    """
+    Удаляет видео ТОЛЬКО если оно принадлежит участнику.
+    Возвращает True если удалено, False если не найдено/не принадлежит.
+    """
+    with get_connection() as conn:
+        cur = conn.execute(
+            "DELETE FROM videos WHERE id = ? AND participant_id = ?",
+            (video_id, participant_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0

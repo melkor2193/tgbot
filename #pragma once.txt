@@ -1,0 +1,78 @@
+#pragma once
+#include <string>
+#include <iostream>
+#include <utility>
+
+class Izdelie {
+protected:
+    std::string name_;
+    double massKg_;
+    std::string material_;
+
+    // связанный список полиморфных объектов
+    Izdelie* next_;
+    static Izdelie* begin_;
+
+    // Важно: включение в список при создании выполняет ТОЛЬКО базовый класс
+    // (выполнено через параметр autoAdd и вызов Add() из конструктора базового класса)
+    explicit Izdelie(std::string name, double massKg, std::string material, bool autoAdd);
+
+public:
+    Izdelie(const Izdelie&) = delete;
+    Izdelie& operator=(const Izdelie&) = delete;
+
+    virtual ~Izdelie() = default;
+
+    void Add();                    // способ №1: объект сам добавляет себя в список
+    static void PrintList();        // просмотр списка через вызов виртуального Show()
+    static void ResetList();        // утилита для демонстрации (не обязательно, но удобно)
+
+    virtual void Show() const = 0;  // абстрактный интерфейс
+};
+
+// ---------------------------------------------
+
+class Detal final : public Izdelie {
+protected:
+    std::string partNumber_;
+    double toleranceMm_;
+
+public:
+    // autoAdd: демонстрация добавления в список из конструктора базового класса
+    Detal(std::string name, double massKg, std::string material,
+          std::string partNumber, double toleranceMm,
+          bool autoAdd = false);
+
+    void Show() const override;
+};
+
+// ---------------------------------------------
+
+class Uzel : public Izdelie {
+protected:
+    int elementsCount_;         // сколько “элементов” (условно)
+    std::string purpose_;
+
+public:
+    Uzel(std::string name, double massKg, std::string material,
+         int elementsCount, std::string purpose,
+         bool autoAdd = false);
+
+    void Show() const override;
+};
+
+// ---------------------------------------------
+
+class Mekhanizm final : public Uzel {
+protected:
+    std::string mechanismType_; // например: редуктор, кулачковый, рычажный...
+    double efficiency_;         // КПД (0..1)
+
+public:
+    Mekhanizm(std::string name, double massKg, std::string material,
+              int elementsCount, std::string purpose,
+              std::string mechanismType, double efficiency,
+              bool autoAdd = false);
+
+    void Show() const override;
+};

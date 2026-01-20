@@ -18,6 +18,7 @@ from config import BOT_TOKEN, HOST_PIN
 
 from db import (
     init_db,
+    delete_video_for_participant,
     get_user_by_telegram_id,
     create_user,
     update_user_role,
@@ -44,7 +45,37 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.WARNING) 
+
 logger = logging.getLogger(__name__)
+
+TELEGRAM_TEXT_LIMIT = 4000  # запас (лимит Telegram ~4096)
+
+def split_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
+    """
+    Разбивает длинный текст на части <= limit, стараясь резать по строкам.
+    """
+    lines = text.split("\n")
+    parts = []
+    buf = ""
+
+    for line in lines:
+        if len(buf) + len(line) + 1 > limit:
+            if buf:
+                parts.append(buf)
+                buf = ""
+            while len(line) > limit:
+                parts.append(line[:limit])
+                line = line[limit:]
+        buf = (buf + "\n" + line) if buf else line
+
+    if buf:
+        parts.append(buf)
+    return parts
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -88,6 +119,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text,
         reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
     )
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Unhandled exception in handler", exc_info=context.error)
+
+async def show_participant_menu(message):
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить видео", callback_data="action_add_video")]
+    ]
+    await message.reply_text(
+        "Меню участника:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def show_host_menu(message):
+    keyboard = [
+        [InlineKeyboardButton("🎛 Панель ведущего", callback_data="action_host_panel")]
+    ]
+    await message.reply_text(
+        "Меню ведущего:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def show_host_panel_menu(message):
+    nominations = get_nominations()
+    keyboard = [
+        [InlineKeyboardButton(f"{n['id']}. {n['name']}", callback_data=f"host_nom_{n['id']}")]
+        for n in nominations
+    ]
+    keyboard.append([InlineKeyboardButton("📄 Все прикреплённые видео", callback_data="host_all_videos")])
+    keyboard.append([InlineKeyboardButton("⬅ Назад", callback_data="back_to_main")])
+
+    await message.reply_text(
+        "Панель ведущего:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
 
 async def role_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -193,6 +262,9 @@ async def send_add_video_nomination_menu(message, db_user, context: ContextTypes
     )
 
 
+
+
+
 async def add_video_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Остаётся как запасной вариант через слэш, но не обязателен."""
     user = update.effective_user
@@ -218,8 +290,7 @@ async def add_video_nomination_callback(update: Update, context: ContextTypes.DE
     query = update.callback_query
     await query.answer()
 
-    user = query.from_user
-    tg_id = user.id
+    tg_id = query.from_user.id
     db_user = get_user_by_telegram_id(tg_id)
 
     if not db_user or db_user["role"] != ROLE_PARTICIPANT:
@@ -229,9 +300,8 @@ async def add_video_nomination_callback(update: Update, context: ContextTypes.DE
         )
         return
 
-    data = query.data 
     try:
-        nomination_id = int(data.replace("add_video_nom_", ""))
+        nomination_id = int(query.data.replace("add_video_nom_", ""))
     except ValueError:
         await query.edit_message_text("Ошибка выбора номинации.")
         return
@@ -241,30 +311,85 @@ async def add_video_nomination_callback(update: Update, context: ContextTypes.DE
         await query.edit_message_text("Номинация не найдена.")
         return
 
-    participant_id = db_user["id"]
-    existing_count = get_participant_videos_count(participant_id, nomination_id)
+    # Сбрасываем режимы ожидания ввода, чтобы не было путаницы
+    context.user_data.pop("awaiting_video_title_nomination_id", None)
+    context.user_data.pop("awaiting_video_url_nomination_id", None)
+    context.user_data.pop("temp_video_title", None)
 
-    if existing_count >= 3:
-        videos = get_participant_videos_for_nomination(participant_id, nomination_id)
-        text_lines = [
-            f"У вас уже 3 видео в номинации «{nomination['name']}».",
-            "",
-            "Ваши видео:",
-        ]
-        for v in videos:
-            text_lines.append(f"- {v['title']} ({v['url']})")
-        await query.edit_message_text("\n".join(text_lines))
+    # ВАЖНО: показываем экран управления и выходим.
+    await render_nomination_manage_screen(query, context, db_user, nomination_id)
+    return
+
+
+async def add_in_nom_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    db_user = get_user_by_telegram_id(query.from_user.id)
+    if not db_user or db_user["role"] != ROLE_PARTICIPANT:
+        await query.edit_message_text("Эта кнопка доступна только участникам.")
         return
 
+    nomination_id = int(query.data.replace("add_in_nom_", ""))
+
+    # проверка лимита 3
+    participant_id = db_user["id"]
+    if get_participant_videos_count(participant_id, nomination_id) >= 3:
+        await render_nomination_manage_screen(query, context, db_user, nomination_id)
+        return
+
+    nomination = get_nomination_by_id(nomination_id)
+
+    # ставим режим ожидания названия
     context.user_data["awaiting_video_title_nomination_id"] = nomination_id
     context.user_data.pop("awaiting_video_url_nomination_id", None)
     context.user_data.pop("temp_video_title", None)
 
     await query.edit_message_text(
         f"Номинация: «{nomination['name']}».\n"
-        f"Сейчас у вас {existing_count} видео.\n\n"
-        "Отправьте сообщение с НАЗВАНИЕМ видео."
+        "Отправьте сообщение с НАЗВАНИЕМ видео.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅ Назад к номинации", callback_data=f"back_to_nom_manage_{nomination_id}")]
+        ])
     )
+
+async def back_to_nom_manage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    db_user = get_user_by_telegram_id(query.from_user.id)
+    if not db_user or db_user["role"] != ROLE_PARTICIPANT:
+        await query.edit_message_text("Эта кнопка доступна только участникам.")
+        return
+
+    nomination_id = int(query.data.replace("back_to_nom_manage_", ""))
+
+    # сбрасываем ожидание ввода
+    context.user_data.pop("awaiting_video_title_nomination_id", None)
+    context.user_data.pop("awaiting_video_url_nomination_id", None)
+    context.user_data.pop("temp_video_title", None)
+
+    await render_nomination_manage_screen(query, context, db_user, nomination_id)
+
+async def delete_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    db_user = get_user_by_telegram_id(query.from_user.id)
+    if not db_user or db_user["role"] != ROLE_PARTICIPANT:
+        await query.edit_message_text("Удалять видео могут только участники.")
+        return
+
+    # del_video_<video_id>_<nomination_id>
+    parts = query.data.split("_")
+    video_id = int(parts[2])
+    nomination_id = int(parts[3])
+
+    deleted = delete_video_for_participant(video_id, db_user["id"])
+
+    # После удаления (или если не удалилось) — перерисовываем экран
+    await render_nomination_manage_screen(query, context, db_user, nomination_id)
+
 
 async def send_host_panel(message, db_user, context: ContextTypes.DEFAULT_TYPE):
     nominations = get_nominations()
@@ -283,7 +408,98 @@ async def send_host_panel(message, db_user, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
+async def back_to_nomination_picker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    db_user = get_user_by_telegram_id(query.from_user.id)
+    if not db_user or db_user["role"] != ROLE_PARTICIPANT:
+        await query.edit_message_text("Эта кнопка доступна только участникам.")
+        return
+
+    # Важно: отменяем “ожидание названия/ссылки”, чтобы не было путаницы
+    context.user_data.pop("awaiting_video_title_nomination_id", None)
+    context.user_data.pop("awaiting_video_url_nomination_id", None)
+    context.user_data.pop("temp_video_title", None)
+
+    # Показываем меню выбора номинации заново
+    await send_add_video_nomination_menu(query.message, db_user, context)
+
+
 async def host_all_videos_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ведущий смотрит все прикреплённые видео по номинациям и участникам."""
+    query = update.callback_query
+    await query.answer()
+
+    db_user = get_user_by_telegram_id(query.from_user.id)
+    if not db_user or db_user["role"] != ROLE_HOST:
+        await query.edit_message_text("Эта функция доступна только ведущему.")
+        return
+
+    rows = get_all_videos_with_meta()
+    back_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅ Назад", callback_data="back_to_host_panel")]
+    ])
+
+    if not rows:
+        await query.edit_message_text("Пока ни одно видео не прикреплено.", reply_markup=back_markup)
+        return
+
+    # Формируем текст
+    lines = []
+    current_nomination_id = None
+    current_participant_id = None
+    per_participant_counter = 0
+
+    for r in rows:
+        nom_id = r["nomination_id"]
+        nom_name = r["nomination_name"]
+        part_id = r["participant_id"]
+        part_name = r["participant_name"]
+        title = r["title"]
+        url = r["url"]
+
+        # Новая номинация
+        if nom_id != current_nomination_id:
+            if lines:
+                lines.append("")  # пустая строка между номинациями
+            lines.append(f"Номинация {nom_id}. {nom_name}")
+            current_nomination_id = nom_id
+            current_participant_id = None
+
+        # Новый участник внутри номинации
+        if part_id != current_participant_id:
+            lines.append("")  # пустая строка перед участником
+            lines.append(part_name)
+            current_participant_id = part_id
+            per_participant_counter = 1
+        else:
+            per_participant_counter += 1
+
+        lines.append(f'{per_participant_counter}. "{title}"')
+        lines.append(url)
+
+    text = "\n".join(lines).strip()
+    parts = split_text(text)
+
+    # 1) Первую часть — редактируем текущее сообщение
+    if len(parts) == 1:
+        await query.edit_message_text(parts[0], reply_markup=back_markup)
+        return
+
+    await query.edit_message_text(parts[0])
+
+    # 2) Остальные части — отдельными сообщениями ведущему
+    for part in parts[1:]:
+        await context.bot.send_message(chat_id=query.from_user.id, text=part)
+
+    # 3) Финальная кнопка "Назад"
+    await context.bot.send_message(
+        chat_id=query.from_user.id,
+        text="Конец списка.",
+        reply_markup=back_markup
+    )
+
     """Ведущий смотрит все прикреплённые видео по номинациям и участникам."""
     query = update.callback_query
     await query.answer()
@@ -291,8 +507,13 @@ async def host_all_videos_callback(update: Update, context: ContextTypes.DEFAULT
     user = query.from_user
     db_user = get_user_by_telegram_id(user.id)
     if not db_user or db_user["role"] != ROLE_HOST:
-        await query.edit_message_text("Эта функция доступна только ведущему.")
-        return
+        await query.edit_message_text(
+    text,
+    reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅ Назад", callback_data="back_to_host_panel")]
+    ])
+)
+
 
     rows = get_all_videos_with_meta()
     if not rows:
@@ -330,10 +551,18 @@ async def host_all_videos_callback(update: Update, context: ContextTypes.DEFAULT
 
         lines.append(f'{per_participant_counter}. "{title}"')
         lines.append(url)
+        text_parts = split_text(text)
+        await query.edit_message_text(text_parts[0])
+        for part in text_parts[1:]:await context.bot.send_message(chat_id=query.from_user.id, text=part)
+        await context.bot.send_message(
+    chat_id=query.from_user.id,
+    text="Конец списка.",
+    reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅ Назад", callback_data="back_to_host_panel")]
+    ])
+)
 
-    text = "\n".join(lines)
 
-    await query.edit_message_text(text)
 
 
 async def host_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -361,13 +590,39 @@ async def host_nomination_callback(update: Update, context: ContextTypes.DEFAULT
     nomination_id = int(data.replace("host_nom_", ""))
     nomination = get_nomination_by_id(nomination_id)
     keyboard = [
-        [InlineKeyboardButton("▶️ Запустить голосование", callback_data=f"start_vote_{nomination_id}")],
-        [InlineKeyboardButton("🛑 Закрыть голосование", callback_data=f"stop_vote_{nomination_id}")],
-    ]
+    [InlineKeyboardButton("▶️ Запустить голосование", callback_data=f"start_vote_{nomination_id}")],
+    [InlineKeyboardButton("🛑 Закрыть голосование", callback_data=f"stop_vote_{nomination_id}")],
+    [InlineKeyboardButton("⬅ Назад", callback_data="back_to_host_panel")]
+]
+
     await query.edit_message_text(
         f"Номинация: {nomination['name']}\nВыберите действие:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
+async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user = query.from_user
+    db_user = get_user_by_telegram_id(user.id)
+
+    if not db_user:
+        await query.edit_message_text("Используйте /start")
+        return
+
+    if query.data == "back_to_main":
+        if db_user["role"] == ROLE_PARTICIPANT:
+            await show_participant_menu(query.message)
+        else:
+            await show_host_menu(query.message)
+
+    elif query.data == "back_to_participant_menu":
+        await show_participant_menu(query.message)
+
+    elif query.data == "back_to_host_panel":
+        await show_host_panel_menu(query.message)
+
 
 async def start_vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -451,6 +706,58 @@ async def stop_vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode="Markdown",
     )
 
+async def render_nomination_manage_screen(query, context: ContextTypes.DEFAULT_TYPE, db_user, nomination_id: int):
+    nomination = get_nomination_by_id(nomination_id)
+    if not nomination:
+        await query.edit_message_text("Номинация не найдена.")
+        return
+
+    participant_id = db_user["id"]
+    videos = get_participant_videos_for_nomination(participant_id, nomination_id)
+    count = len(videos)
+
+    # Текст
+    lines = [
+        f"Номинация: «{nomination['name']}»",
+        f"Ваши видео: {count}/3",
+        ""
+    ]
+    if not videos:
+        lines.append("Пока нет добавленных видео.")
+    else:
+        for i, v in enumerate(videos, start=1):
+            lines.append(f'{i}. "{v["title"]}"')
+            lines.append(v["url"])
+
+    text = "\n".join(lines)
+
+    # Кнопки
+    keyboard = []
+
+    # Кнопки удаления по каждому видео
+    for v in videos:
+        title_short = v["title"][:30] + ("…" if len(v["title"]) > 30 else "")
+        keyboard.append([
+            InlineKeyboardButton(f"🗑 Удалить: {title_short}", callback_data=f"del_video_{v['id']}_{nomination_id}")
+        ])
+
+    # Кнопка добавить (если ещё не 3)
+    if count < 3:
+        keyboard.append([
+            InlineKeyboardButton("➕ Добавить видео в эту номинацию", callback_data=f"add_in_nom_{nomination_id}")
+        ])
+
+    # Назад к выбору номинации
+    keyboard.append([
+        InlineKeyboardButton("⬅ Назад к выбору номинации", callback_data="back_to_nomination_picker")
+    ])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     tg_id = user.id
@@ -479,8 +786,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
-            await update.message.reply_text("Неверный PIN. Попробуйте ещё раз.")
+            await update.message.reply_text(
+    f"✅ Видео добавлено в номинацию «{nomination['name']}».\n"
+    f"Название: «{video['title']}»\n"
+    f"Ссылка: {video['url']}\n\n"
+    "Что дальше?",
+    reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Открыть эту номинацию", callback_data=f"add_video_nom_{nomination_id_for_url}")],
+        [InlineKeyboardButton("⬅ К номинациям", callback_data="back_to_nomination_picker")],
+    ])
+)
+
         return
+
+
 
     db_user = get_user_by_telegram_id(tg_id)
 
@@ -536,6 +855,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Используйте /start, чтобы увидеть доступные вам кнопки."
     )
 
+
 def main():
     init_db()
 
@@ -551,12 +871,16 @@ def main():
     app.add_handler(CallbackQueryHandler(stop_vote_callback, pattern="^stop_vote_"))
     app.add_handler(CallbackQueryHandler(participant_vote_callback, pattern="^vote_"))
     app.add_handler(CallbackQueryHandler(host_all_videos_callback, pattern="^host_all_videos$"))
-
-
+    app.add_handler(CallbackQueryHandler(back_to_nomination_picker_callback, pattern="^back_to_nomination_picker$"))
+    app.add_handler(CallbackQueryHandler(back_callback, pattern="^back_"))
+    app.add_handler(CallbackQueryHandler(delete_video_callback, pattern="^del_video_"))
+    app.add_handler(CallbackQueryHandler(add_in_nom_callback, pattern="^add_in_nom_"))
+    app.add_handler(CallbackQueryHandler(back_to_nom_manage_callback, pattern="^back_to_nom_manage_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_error_handler(error_handler)
 
     print("Бот запущен. Ctrl+C для остановки.")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True, timeout=20)
 
 
 if __name__ == "__main__":
